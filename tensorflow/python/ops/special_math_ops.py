@@ -153,6 +153,9 @@ def einsum(equation, *inputs, **kwargs):
       - the input shapes are inconsistent along a particular axis.
   """
   name = kwargs.pop("name", None)
+
+  multiple_character_label = False
+
   if kwargs:
     raise TypeError("invalid keyword arguments for this function: " +
                     ", ".join([format(key)
@@ -163,39 +166,67 @@ def einsum(equation, *inputs, **kwargs):
 
     match = re.match('([a-z,]+)(->[a-z]*)?', equation)
     if not match:
-      raise ValueError(
-          'Indices have incorrect format: %s' % equation
-      )
+      match = re.match('(((\([a-zA-Z0-9_\-]+\))+)|,)+(->)(((\([a-z0-9]+\))+))?',equation)
+      multiple_character_label = True
+      if not match:
+        raise ValueError(
+            'Indices have incorrect format: %s' % equation
+        )
 
     inputs = list(inputs)
-    input_axis_labels = match.group(1).split(',')
 
-    if len(inputs) != len(input_axis_labels):
-      raise ValueError('Got %d arguments for equation "%s", expecting %d' % (
-          len(inputs), equation, len(input_axis_labels)))
+    if not multiple_character_label:
+      input_axis_labels = match.group(1).split(',')
 
-    axis_labels = set(''.join(input_axis_labels))
-    if match.group(2):
-      output_axis_labels = match.group(2)[2:]
+      if len(inputs) != len(input_axis_labels):
+        raise ValueError('Got %d arguments for equation "%s", expecting %d' % (
+            len(inputs), equation, len(input_axis_labels)))
+
+      axis_labels = set(''.join(input_axis_labels))
+      if match.group(2):
+        output_axis_labels = match.group(2)[2:]
+      else:
+        # infer the output subscripts if not given, assume alphabetical order
+        indices = ''.join(sorted(axis_labels))
+        counts = {ax: 0 for ax in indices}
+        for axes_ in input_axis_labels:
+          for ax in axes_:
+            counts[ax] += 1
+
+        output_axis_labels = ''.join(sorted(
+            ax for ax in indices
+            if counts[ax] == 1
+        ))
     else:
-      # infer the output subscripts if not given, assume alphabetical order
-      indices = ''.join(sorted(axis_labels))
-      counts = {ax: 0 for ax in indices}
-      for axes_ in input_axis_labels:
-        for ax in axes_:
-          counts[ax] += 1
+      #
+      # For multiple character labels
+      #
+      input_labels_string,output_labels_string = equation.split("->")
+      input_axis_labels_joined_string = input_labels_string.split(",")[1,-1]
+      input_axis_labels = input_axis_labels_joined_string.split(")(")
 
-      output_axis_labels = ''.join(sorted(
-          ax for ax in indices
-          if counts[ax] == 1
-      ))
+      if len(inputs) != len(input_axis_labels):
+        raise ValueError('Got %d arguments for equation "%s", expecting %d' % (
+            len(inputs), equation, len(input_axis_labels)))
+
+      axis_labels = set(input_axis_labels)
+
+      if output_labels_string:
+        output_axis_labels = output_labels_string[1:-1].split(")(")
+      else:
+        raise NotImplementedError("Infering for multiple character labels is not implemented.")
 
     for a in axis_labels:
       input_count = sum(1 for s in input_axis_labels if a in s)
       if input_count > 2 and a not in output_axis_labels:
+
         logging.warn(
             'Falling back to exponential-space implementation of einsum() because'
             ' index "%s" is summed over more than two inputs.', a)
+
+        if multiple_character_label:
+          raise NotImplementedError("Exponential einsum for multiple character labels is not implemented.")
+
         return _exponential_space_einsum(equation, *inputs)
 
     temp = inputs[0]
@@ -293,7 +324,8 @@ def _einsum_reduction(t0, t0_axis_labels, t1, t1_axis_labels, axes_to_sum):
                  for i, sym_list in enumerate(axis_labels)]
   inputs = [t0, t1]
   for i, axes_str in enumerate(axis_labels):
-    perm = [axes_str.find(a) for a in sorted_axes[i]]
+    axes_list = list(axes_str)
+    perm = [axes_list.index(a) for a in sorted_axes[i]]
     inputs[i] = _transpose_if_necessary(inputs[i], perm)
   t0, t1 = inputs
 
